@@ -1,0 +1,412 @@
+---
+title: "Detecting Falls of Elderly Persons With Wearable Devices"
+author: "Austin Murr"
+date: "1/2/2021"
+output: pdf_document
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r, include=FALSE}
+# SET WORKING DIRECTORY
+setwd("C:/Users/Austin Murr/Documents/St. Thomas/Year 3/Harvard Data Science/Capstone/FallDetection")
+```
+
+```{r, echo = FALSE, results='hide', message=FALSE, warning=FALSE}
+# IMPORT LIBRARIES
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(lubridate)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+library(ggpubr)
+library(knitr)
+library(car)
+library(gridExtra)
+options(scipen = 999)
+```
+
+
+```{r, echo = FALSE, results='hide', message=FALSE, warning=FALSE}
+# IMPORT DATA
+raw = read_csv("falldetection.csv")
+raw = raw %>% as_tibble()
+```
+
+
+# Executive Summary
+
+## Motivation
+Falls among the elderly population is a serious health concern. In fact, the CDC reports that the mortality rate of falls for people aged 65 and older rose by 30% between 2007 and 2016. Perhaps just as concerning is that while about 20% of geriatric falls results in a serious injury, less than half of elders who experience falls notify their doctors. The advent of wearbale smart devices, however, offers a chance to change this. If data from the accelerometers and vitals sensors in smart watches can be analyzed to distinguish falls from other daily activities, it would allow health care providers or family members to recevie instant alerts of an elderly person's fall. In turn, this would enable a more rapid response to falls that necessitate medical attention.
+
+## Data
+The dataset used for this paper is publicly available on Kaggle as ["Fall Detection Data from China"](https://www.kaggle.com/pitasr/falldata).
+
+The researchers who gathered this data derived it from 14 volunteers, each of whom recorded data for 20 falls and 16 activities of daily living (ADLs). For each of these 2,520 trials, the 4 seconds centered on the moment of greatest acceleration has been sampled from.
+
+In total, there are `r NCOL(raw)` features with `r NROW(raw)` observations. The features are as follows:
+
+ - Activity (factor with levels **Standing, Walking, Sitting, Falling, Cramps,** and **Running**)
+ - Time of Observation (within 4 second window)
+ - Blood Sugar
+ - EEG
+ - Blood Pressure
+ - Heart Rate
+ - Circulation
+
+## Goal
+The researchers who published this dataset claimed their ML algorithm could identify falls with "sensitivity, specificity, and accuracy all above 95%."
+
+As these are academic researchers who are more skilled than I, the goal for this project will be attaining a model with measurements of sensitivity, specificity, and accuracy above 85%. 
+
+
+# Analysis
+
+## Data Cleaning
+
+The data given is already in a rather clean format:
+
+```{r echo=FALSE}
+head(raw) %>% kable()
+```
+
+One of the things that can be done, however, is changing the factor levels for `ACTIVITY` into meaningful labels. After referencing the data's documentation, we are able to recode the factors. Additionally, we will expand the column names from their abbreviated states so their meanings become more apparent.
+
+```{r echo=FALSE}
+falls = raw %>% mutate(
+  Activity = recode(factor(ACTIVITY), 
+                    recodes = "'0'='Standing';
+                              '1'='Walking';
+                              '2'='Sitting';
+                              '3'='Falling';
+                              '4'='Cramps';
+                              '5'='Running'"),
+  Time = TIME,
+  SugarLevel = SL,
+  EEG = EEG,
+  BloodPressure = BP,
+  HeartRate = HR,
+  Circulation = CIRCLUATION
+) %>% 
+  select(Activity, Time, SugarLevel, EEG, BloodPressure, HeartRate, Circulation)
+```
+
+```{r echo=FALSE}
+head(falls) %>% kable()
+```
+
+Another step in cleaning the data is simplifying the `Activity` column to a logical vector denoting whether the observation is a fall or not. This is not absolutely necessary, but it does simplify the problem from a multiclass calssification task to a binary classification one.
+
+```{r echo=FALSE}
+falls = falls %>% mutate(Fall = ifelse(Activity == "Falling", TRUE, FALSE))
+
+falls %>% select(Activity, Fall) %>% head() %>% kable()
+```
+
+Now it is time to see if we have any outliers that would make any meaningful form of analysis difficult. If so, we should remove those anomalies. Typically, we would use the standard Tukey Outlier Definition:
+
+$$[Q_1 - 1.5 * (Q_3 - Q_1), Q_3 + 1.5 * (Q_3 - Q_1)]$$
+
+This is what the raw data looks like:
+
+```{r echo = FALSE}
+sl_box = falls %>% ggplot(aes(SugarLevel, col = Fall)) + geom_boxplot() + ggtitle("Blood Sugar")
+eeg_box = falls %>% ggplot(aes(EEG, col = Fall)) + geom_boxplot() + ggtitle("EEG")
+bp_box = falls %>% ggplot(aes(BloodPressure, col = Fall)) + geom_boxplot() + ggtitle("Blood Pressure")
+hr_box = falls %>% ggplot(aes(HeartRate, col = Fall)) + geom_boxplot() + ggtitle("Heart Rate")
+circ_box = falls %>% ggplot(aes(Circulation, col = Fall)) + geom_boxplot() + ggtitle("Circulation")
+
+ggarrange(sl_box, eeg_box, bp_box, hr_box, circ_box)
+```
+
+As is quite clear, there are quite a few outliers that impact the data, most notably in the `SugarLevel`, `EEG`, and `Circulation` categories. 
+
+This table further illustrates the extent of noise in this data, as the Standard Deviation is absurdly large, and the extremes of our data often are unrealistic readings, suggesting questionable sensor performance:
+
+```{r echo = FALSE}
+stat_chart = tibble(Feature = c(), Min = c(), Max = c(), Mean = c(), SD = c(),  IQR = c(), SDtoIQR_Ratio = c())
+
+
+for(column in c('SugarLevel', 'EEG', 'HeartRate', 'BloodPressure', 'Circulation')){
+  feature = column
+  mean = falls[[column]] %>% mean()
+  sd = falls[[column]] %>% sd()
+  iqr = falls[[column]] %>% IQR()
+  min = falls[[column]] %>% min()
+  max = falls[[column]] %>% max()
+  ratio = sd / iqr
+  
+  
+  stat_chart = stat_chart %>% add_row(Feature = feature, Mean = mean, SD = sd, Min = min, IQR = iqr, Max = max, SDtoIQR_Ratio = ratio)
+}
+
+stat_chart
+```
+
+The minimum and maximum values most certainly qualify as outliers (a Heart Rate of 986 would be beyond lethal, and same with Blood Pressure reading at 0), but the more alarming issue is comparing the standard deviation to the interquartile range. For normally distributed data, this tends to settle at around 0.74, as shown by this code:
+
+```{r}
+d = rnorm(1000000)
+
+tibble(SDtoIQR_Ratio = sd(d) / IQR(d))
+```
+
+Of course, we would expect this dataset to not follow the normal distribution entirely because there is a physiological reponse occuring in the body over Time, but such large ratios are a red flag to be cautious about the number of outliers.
+
+Simply applying the Tukey outlier filter helps significantly, making our data look like the following:
+
+```{r echo = FALSE}
+orig = falls
+falls = falls %>% filter(
+  EEG > quantile(EEG, 0.25) - 1.5*IQR(EEG) & 
+  EEG < quantile(EEG, 0.75) + 1.5*IQR(EEG) &
+  SugarLevel > quantile(SugarLevel, 0.25) - 1.5*IQR(SugarLevel) &
+  SugarLevel < quantile(SugarLevel, 0.75) + 1.5*IQR(SugarLevel) &
+  Circulation > quantile(Circulation, 0.25) - 1.5*IQR(Circulation) &
+  Circulation < quantile(Circulation, 0.75) + 1.5*IQR(Circulation) &
+  BloodPressure > quantile(BloodPressure, 0.25) - 1.5*IQR(BloodPressure) &
+  BloodPressure < quantile(BloodPressure, 0.75) + 1.5*IQR(BloodPressure) &
+  HeartRate > quantile(HeartRate, 0.25) - 1.5*IQR(HeartRate) &
+  HeartRate < quantile(HeartRate, 0.75) + 1.5*IQR(HeartRate)
+)
+```
+
+```{r echo = FALSE}
+sl_box = falls %>% ggplot(aes(SugarLevel, col = Fall)) + geom_boxplot() + ggtitle("Blood Sugar")
+eeg_box = falls %>% ggplot(aes(EEG, col = Fall)) + geom_boxplot() + ggtitle("EEG")
+bp_box = falls %>% ggplot(aes(BloodPressure, col = Fall)) + geom_boxplot() + ggtitle("Blood Pressure")
+hr_box = falls %>% ggplot(aes(HeartRate, col = Fall)) + geom_boxplot() + ggtitle("Heart Rate")
+circ_box = falls %>% ggplot(aes(Circulation, col = Fall)) + geom_boxplot() + ggtitle("Circulation")
+
+ggarrange(sl_box, eeg_box, bp_box, hr_box, circ_box)
+```
+
+```{r echo = FALSE}
+stat_chart = tibble(Feature = c(), Min = c(), Max = c(), Mean = c(), SD = c(),  IQR = c(), SDtoIQR_Ratio = c())
+
+
+for(column in c('SugarLevel', 'EEG', 'HeartRate', 'BloodPressure', 'Circulation')){
+  feature = column
+  mean = falls[[column]] %>% mean()
+  sd = falls[[column]] %>% sd()
+  iqr = falls[[column]] %>% IQR()
+  min = falls[[column]] %>% min()
+  max = falls[[column]] %>% max()
+  ratio = sd / iqr
+  
+  
+  stat_chart = stat_chart %>% add_row(Feature = feature, Mean = mean, SD = sd, Min = min, IQR = iqr, Max = max, SDtoIQR_Ratio = ratio)
+}
+
+stat_chart
+```
+
+The data looks much more usable now.
+
+Finally, the dataset needs to be separated into a training set and a test set before continuing onto Exploratory Data Analysis and Visualization. The data will be partitioned so 90% is used for training and 10% is used for testing:
+
+```{r warning=FALSE}
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(falls$Fall, times = 1, p = 0.1, list = FALSE)
+train = falls[-test_index,]
+test = falls[test_index,]
+
+train = train %>% arrange(Time)
+test = test %>% arrange(Time)
+```
+
+
+## Exploratory Data Analysis
+
+In our training set, there are roughly 4 times the number of non-falls as there are recorded falls. In the figure below, the breakdown of specific activities is given for the broader `Fall` classifications.
+
+```{r echo=FALSE}
+train %>% ggplot(aes(Fall, fill = Activity)) + geom_bar()
+```
+
+As a way to visualize how grouping activities into the binary `Fall` category simplifies our task, the figures below compare the difference between grouping by the 6 factor `Activity` column and grouping according to the binary `Fall` column, respectively. The figures chart the recorded `BloodPressure` versus the `Time`.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+train %>% ggplot(aes(Time, BloodPressure, col = Activity)) + geom_smooth() + ggtitle("Grouped by Activity")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train = train %>% select(-Activity)
+test = test %>% select(-Activity)
+train %>% ggplot(aes(Time, BloodPressure, col = Fall)) + geom_smooth() + ggtitle("Grouped by Fall")
+```
+
+As is clearly demonstrated, binary classification reveals trends that are easier to decipher.
+
+```{r echo = FALSE, message=FALSE,warning=FALSE}
+blood_sugar_time = train %>% ggplot(aes(Time, SugarLevel, col = Fall)) + geom_smooth() + scale_x_continuous(limits = c(0, 27000)) + ggtitle("Blood Sugar")
+
+eeg_time = train %>% ggplot(aes(Time, EEG, col = Fall)) + geom_smooth() + scale_x_continuous(limits = c(0, 27000)) + ggtitle("EEG")
+
+blood_pressure_time = train %>% ggplot(aes(Time, BloodPressure, col = Fall)) + geom_smooth() + scale_x_continuous(limits = c(0, 27000)) + ggtitle("Blood Pressure")
+
+heart_rate_time = train %>% ggplot(aes(Time, HeartRate, col = Fall)) + geom_smooth() + scale_x_continuous(limits = c(0, 27000)) + ggtitle("Heart Rate")
+
+circulation_time = train %>% ggplot(aes(Time, Circulation, col = Fall)) + geom_smooth() + scale_x_continuous(limits = c(0, 27000)) + ggtitle("Circulation")
+
+ggarrange(blood_sugar_time,
+          eeg_time,
+          blood_pressure_time,
+          heart_rate_time,
+          circulation_time,
+          common.legend = TRUE
+          )
+```
+
+These graphs depict the general patterns for each feature plotted against time. For the most part, there are no extraordinary differences between the trends for both Falls and non-Falls. Predictions, then, will likely have to rely on a number of features.
+
+To ascertain a quantitative value of each feature's predictive power, we will train a Random Forest and analyze the variable importance assigned to each feature.
+
+```{r warning=FALSE, message=FALSE}
+set.seed(2021, sample.kind = "Rounding")
+train_control = trainControl(method="cv", number=10, savePredictions = TRUE)
+rf_fit = train(
+  factor(Fall) ~ .,
+  data = train,
+  method = "rf",
+  trControl = train_control
+  )
+```
+
+```{r echo = FALSE}
+result = rf_fit$results$Accuracy %>% max() %>% as.numeric()
+acc = str_c(substr(as.character(result*100), 1, 4), '%')
+```
+
+The best performing model trained had an overall accuracy of `r acc`.
+
+The variable most important to the random forest's success was blood's `SugarLevel`. This seems rather surprising given the more variant chart of `BloodPressure`. Even more surprising is *how* important it actually was. To illustrate, here is a graph charting the relative importance of each variable:
+
+```{r echo = FALSE}
+varImp(rf_fit) %>% ggplot()
+```
+
+Given the shocking importance of `SugarLevel`, it might be insightful to train another model with this as the primary predictor. Let's take a deeper look at the distribution of `SugarLevel`.
+
+```{r echo = FALSE}
+train %>% ggplot(aes(SugarLevel, fill=Fall)) + geom_density(alpha = 0.3)
+```
+
+
+It appears that measurements of Blood Sugar tend to coalesce into density groups, as testified to by the humps in the density plot. Moreover, when grouped by `Fall` type, there appear to be some regions that are more likely to host a certain type of Fall as opposed to the other.
+
+This information will be important for fine-tuning our models.
+
+# Model Building
+
+So far, our first Random Forest model had an accuracy of `r acc`, which is rather good for a first shot.
+
+Let's take a look at where it struggled the most.
+
+```{r echo = FALSE}
+row_index = rf_fit$pred %>% filter(pred != obs) %>% select(rowIndex) %>% as.matrix()
+train[row_index,] %>% group_by(Fall) %>% summarize(Count = n(), Time = median(Time), SugarLevel = median(SugarLevel), EEG = median(EEG), BloodPressure = median(BloodPressure), HeartRate = median(HeartRate), Circulation = median(Circulation))
+```
+
+The Random Forest had significant difficulties identifying true falls, instead heavily favoring FALSE Falls. In the summary statistics, the median value is reported in order to resist the effects of outliers. The largest gap between the TRUE and FALSE Fall values is the `SugarLevel`. It just so happens that the deficit of TRUE Falls occurs where there is a dip in the density of TRUE Falls. In other words, the model is biased toward FALSE results because of the number advantage they have.
+
+To correct this error, we can add simulated normal data to reduce the favor FALSE Falls currently enjoy.
+
+```{r}
+# Using medians as the means for rnorm() to resist outliers
+means = train[row_index,] %>% filter(Fall == TRUE) %>% summarize(Time = median(Time), SugarLevel = median(SugarLevel), EEG = median(EEG), BloodPressure = median(BloodPressure), HeartRate = median(HeartRate), Circulation = median(Circulation))
+
+iqrs = train[row_index,] %>% filter(Fall == TRUE) %>% summarize(Time = IQR(Time), SugarLevel = IQR(SugarLevel), EEG = IQR(EEG), BloodPressure = IQR(BloodPressure), HeartRate = IQR(HeartRate), Circulation = IQR(Circulation))
+
+# SDs are calculated from the IQR to ensure the SDs are not biased from outliers
+sds = iqrs * 0.35
+
+new_data = tibble(Time = vector(length = 100), SugarLevel = vector(length = 100), EEG = vector(length = 100), BloodPressure = vector(length = 100), HeartRate = vector(length = 100), Circulation = vector(length = 100))
+
+for(feature in colnames(means)){
+  mean = means[[feature]] %>% as.numeric()
+  sd = sds[[feature]] %>% as.numeric()
+  data = rnorm(100, mean = mean, sd = sd)
+  new_data[[feature]] = data
+}
+
+new_data$Fall = rep(TRUE, 100)
+new_data %>% head() %>% kable()
+```
+
+As we can see this data more closely matches the data of the mistakes made. While this will likely cause disruptions to the model's overall performance, it will likely perform better in this specific region.
+
+```{r}
+added = rbind(train, new_data)
+exp_fit = train(
+  factor(Fall) ~ .,
+  data = added,
+  method = "rf",
+  trControl = train_control
+)
+```
+
+While this model performs roughly the same overall, it performs well on our previous mistakes.
+
+```{r}
+mistakes = train[row_index,]
+mean(predict(exp_fit, mistakes) == mistakes$Fall)
+```
+
+The general idea, now, is to put these two random forest models in ensemble, but we need a tie breaker. For this, we will train a k-Nearest Neighbors model. This gives a different perspective as the tie-breaking opinion. We will train this on the original training set.
+
+```{r}
+knn_fit = train(
+  factor(Fall) ~ .,
+  data = train,
+  model = "knn",
+  trControl = train_control
+)
+```
+
+
+# Results
+
+We will run an ensemble of our three models on the test set with the following code.
+
+```{r}
+knn_predict = predict(knn_fit, test)
+exp_predict = predict(exp_fit, test)
+rf_predict = predict(rf_fit, test)
+
+combined = tibble(knn = as.logical(knn_predict), 
+                  exp = as.logical(exp_predict), 
+                  rf = as.logical(rf_predict))
+```
+
+Here is the full confusion matrix:
+
+```{r echo = FALSE}
+confusionMatrix(as.factor(ifelse(rowSums(combined) > 1, TRUE, FALSE)), 
+                reference = as.factor(test$Fall),
+                positive = "TRUE")
+```
+
+The 2 of the 3 goals were met, with overall accuracy and specificity above 85%. However, the sensitivity fell far short of 85%, at around 60%.
+
+While the intent was to be able to predict when a fall actually occurred, we were better able to determine when a patient did not fall. This is definitely a first step in detecting falls of elderly persons with wearable health devices, but the low sensitivity means work still needs to be done.
+
+Among the things that would be most helpful going forward is better quality data. While it appears the model performed poorly, it actually reached the upper limit of what could be done with the given data and non-specialized machine learning algorithms. This is simply because of the amount of unreliable measurements and noisy data points. I tried to combat this by adding in normalized data to increase sensitivity, but that is a less-than-ideal option.
+
+Additionally, having access to a test subject number would have been helpful for comparing baseline activites with falling, customized to that individual. That way, the machine learning algorithms would focus on *changes* in vitals that signify a fall, not merely assuming everybody's vitals are roughly the same.
+
+
+# Conclusion
+
+While I would have liked to switched to a different project with better data, I found that this project forced me to remember things from this Professional Certificate Series and apply it that other projects would not have. It was challenging, but by sticking with it, I was able to think creatively and actually *apply* the knowledge I learned, not simply plugging in prepackaged algorithms. For example, I was stuck for a long time, forgetting about the importance of cleaning outliers out of the data. That is what led me to remembering Tukey's formula, which greatly helped me. I used the basic idea of PCA and dimensionality reduction to simplify the complex data set. Finally, I used my knowledge of the normal distribution to add additional data points while having a minimal effect on the integrity of the training set.
+
+Overall, this was a phenomenal way to complete my journey through this Data Science Professional Certificate series. It gave me the opportunity to think outside the box and persist, qualities that are essential in a good data scientist. That is the greatest skill this project cemented in me as a data scientist: I can think for myself and think creatively, rather than relying on pre-fabricated tools.
+
+
+
