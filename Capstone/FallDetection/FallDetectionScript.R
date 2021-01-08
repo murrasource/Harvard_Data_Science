@@ -7,6 +7,8 @@ if(length(new.packages)>0){install.packages(new.packages)}
 options(scipen = 999)
 
 # IMPORT DATA
+download.file("https://raw.github.com/aronlindberg/latent_growth_classes/master/LGC_data.csv", 
+    destfile = "/falldetection.csv", method = "curl")
 raw = read_csv("falldetection.csv")
 
 # CLEAN DATA
