@@ -1,23 +1,17 @@
 # IMPORT LIBRARIES
-library(tidyverse)
-library(dplyr)
-library(caret)
-library(lubridate)
-library(randomForest)
-library(rpart)
-library(rpart.plot)
-library(ggplot2)
-library(ggpubr)
-library(knitr)
-library(tinytex)
-library(car)
-library(gridExtra)
+list.of.packages <- c("tidyverse","dplyr","caret","lubridate",
+"randomForest","rpart","rpart.plot","ggplot2","ggpubr","knitr","tinytex",
+"car","gridExtra")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)>0){install.packages(new.packages)}
 options(scipen = 999)
 
 # IMPORT DATA
 raw = read_csv("falldetection.csv")
 
 # CLEAN DATA
+
+#Friendly levels
 falls = raw %>% mutate(
   Activity = recode(factor(ACTIVITY), 
                     recodes = "'0'='Standing';
@@ -35,8 +29,10 @@ falls = raw %>% mutate(
 ) %>% 
   select(Activity, Time, SugarLevel, EEG, BloodPressure, HeartRate, Circulation)
 
+# Make binary Fall column
 falls = falls %>% mutate(Fall = ifelse(Activity == "Falling", TRUE, FALSE))
 
+# Filter outliers
 falls = falls %>% filter(
   EEG > quantile(EEG, 0.25) - 1.5*IQR(EEG) & 
     EEG < quantile(EEG, 0.75) + 1.5*IQR(EEG) &
@@ -50,7 +46,7 @@ falls = falls %>% filter(
     HeartRate < quantile(HeartRate, 0.75) + 1.5*IQR(HeartRate)
 )
 
-
+# Train and Test sets
 set.seed(1, sample.kind="Rounding")
 test_index <- createDataPartition(falls$Fall, times = 1, p = 0.1, list = FALSE)
 train = falls[-test_index,]
@@ -59,12 +55,11 @@ test = falls[test_index,]
 train = train %>% arrange(Time)
 test = test %>% arrange(Time)
 
-
-
-
+# Get rid of activity column
 train = train %>% select(-Activity)
 test = test %>% select(-Activity)
 
+# train random forest
 set.seed(2021, sample.kind = "Rounding")
 train_control = trainControl(method="cv", number=10, savePredictions = TRUE)
 rf_fit = train(
@@ -74,17 +69,12 @@ rf_fit = train(
   trControl = train_control
   )
 
-
-result = rf_fit$results$Accuracy %>% max() %>% as.numeric()
-acc = str_c(substr(as.character(result*100), 1, 4), '%')
-
-
-
+# create index of mistakes
 row_index = rf_fit$pred %>% filter(pred != obs) %>% select(rowIndex) %>% as.matrix()
 
+#####Create supplementary normalized data#####
 # Using medians as the means for rnorm() to resist outliers
 means = train[row_index,] %>% filter(Fall == TRUE) %>% summarize(Time = median(Time), SugarLevel = median(SugarLevel), EEG = median(EEG), BloodPressure = median(BloodPressure), HeartRate = median(HeartRate), Circulation = median(Circulation))
-
 iqrs = train[row_index,] %>% filter(Fall == TRUE) %>% summarize(Time = IQR(Time), SugarLevel = IQR(SugarLevel), EEG = IQR(EEG), BloodPressure = IQR(BloodPressure), HeartRate = IQR(HeartRate), Circulation = IQR(Circulation))
 
 # SDs are calculated from the IQR to ensure the SDs are not biased from outliers
@@ -102,6 +92,9 @@ for(feature in colnames(means)){
 new_data$Fall = rep(TRUE, 100)
 
 added = rbind(train, new_data)
+###############
+
+# train RF on supplementary data
 exp_fit = train(
   factor(Fall) ~ .,
   data = added,
@@ -109,8 +102,7 @@ exp_fit = train(
   trControl = train_control
 )
 
-mistakes = train[row_index,]
-mean(predict(exp_fit, mistakes) == mistakes$Fall)
+# train kNN on original train data
 
 knn_fit = train(
   factor(Fall) ~ .,
@@ -119,6 +111,8 @@ knn_fit = train(
   trControl = train_control
 )
 
+
+#### Ensemble predictions on test set
 knn_predict = predict(knn_fit, test)
 exp_predict = predict(exp_fit, test)
 rf_predict = predict(rf_fit, test)
