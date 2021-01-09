@@ -6,10 +6,24 @@ new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"
 if(length(new.packages)>0){install.packages(new.packages)}
 options(scipen = 999)
 
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(lubridate)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+library(ggpubr)
+library(knitr)
+library(tinytex)
+library(car)
+library(gridExtra)
+
 # IMPORT DATA
-download.file("https://github.com/murrasource/Harvard_Data_Science/blob/main/Capstone/FallDetection/falldetection.csv", 
-    destfile = "/falldetection.csv", method = "curl")
-raw = read_csv("falldetection.csv")
+dl = tempfile()
+download.file("https://raw.githubusercontent.com/murrasource/Harvard_Data_Science/main/Capstone/FallDetection/falldetection.csv", dl)
+raw = read_csv(dl)
 
 # CLEAN DATA
 
